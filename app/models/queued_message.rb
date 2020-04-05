@@ -26,8 +26,6 @@
 
 class QueuedMessage < ApplicationRecord
 
-  MAX_ATTEMPTS = 18
-
   include HasMessage
 
   belongs_to :server
@@ -64,7 +62,7 @@ class QueuedMessage < ApplicationRecord
   end
 
   def allocate_ip_address
-    if Postal.config.general.use_ip_pools && self.message && pool = self.server.ip_pool_for_message(self.message)
+    if Postal.ip_pools? && self.message && pool = self.server.ip_pool_for_message(self.message)
       self.ip_address = pool.ip_addresses.order("RAND()").first
     end
   end

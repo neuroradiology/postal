@@ -43,6 +43,10 @@ module Postal
         result.type = 'SoftFail'
         result.retry = true
         result.connect_error = true
+      elsif response[:code] == 429
+        # Rate limit exceeded, treat as a hard fail and don't send bounces
+        result.type = 'HardFail'
+        result.suppress_bounce = true
       else
         # This is permanent. Any other error isn't cool with us.
         result.type = 'HardFail'
@@ -79,7 +83,9 @@ module Postal
           :in_reply_to => message.headers['in-reply-to']&.last,
           :references => message.headers['references']&.last,
           :html_body => message.html_body,
-          :attachment_quantity => message.attachments.size
+          :attachment_quantity => message.attachments.size,
+          :auto_submitted => message.headers['auto-submitted']&.last,
+          :reply_to => message.headers['reply-to']
         }
 
         if @endpoint.strip_replies
@@ -112,6 +118,8 @@ module Postal
       when 'RawMessage'
         {
           :id => message.id,
+          :rcpt_to => message.rcpt_to,
+          :mail_from => message.mail_from,
           :message => Base64.encode64(message.raw_message),
           :base64 => true,
           :size => message.size.to_i

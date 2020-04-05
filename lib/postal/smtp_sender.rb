@@ -19,6 +19,10 @@ module Postal
           hostname = server.hostname
           port = server.port || 25
           ssl_mode = server.ssl_mode
+        elsif server.is_a?(Hash)
+          hostname = server[:hostname]
+          port = server[:port] || 25
+          ssl_mode = server[:ssl_mode] || 'Auto'
         else
           hostname = server
           port = 25
@@ -42,7 +46,9 @@ module Postal
               end
               next
             end
-            smtp_client = Net::SMTP.new(@remote_ip, port)
+            smtp_client = Net::SMTP.new(hostname, port)
+            smtp_client.open_timeout = Postal.config.smtp_client.open_timeout
+            smtp_client.read_timeout = Postal.config.smtp_client.read_timeout
             if @source_ip_address
               # Set the source IP as appropriate
               smtp_client.source_address = ip_type == :aaaa ? @source_ip_address.ipv6 : @source_ip_address.ipv4
@@ -57,7 +63,7 @@ module Postal
             else
               # Nothing
             end
-            smtp_client.start(@source_ip_address ? @source_ip_address.hostname : "localhost")
+            smtp_client.start(@source_ip_address ? @source_ip_address.hostname : self.class.default_helo_hostname)
             log "Connected to #{@remote_ip}:#{port} (#{hostname})"
           rescue => e
             log "Cannot connect to #{@remote_ip}:#{port} (#{hostname}) (#{e.class}: #{e.message})"
@@ -170,7 +176,9 @@ module Postal
         safe_rset
       rescue => e
         log "#{e.class}: #{e.message}"
-        Raven.capture_exception(e, :extra => {:log_id => @log_id, :server_id => message.server.id, :message_id => message.id})
+        if defined?(Raven)
+          Raven.capture_exception(e, :extra => {:log_id => @log_id, :server_id => message.server.id, :message_id => message.id})
+        end
         result.type = 'SoftFail'
         result.retry = true
         result.details = "An error occurred while sending the message to #{destination_host_description}"
@@ -191,7 +199,7 @@ module Postal
     private
 
     def servers
-      @options[:servers] || @servers ||= begin
+      @options[:servers] || self.class.relay_hosts || @servers ||= begin
         mx_servers = []
         Resolv::DNS.open do |dns|
           dns.timeouts = [10,5]
@@ -230,6 +238,8 @@ module Postal
       @ssl_context_with_verify ||= begin
         c = OpenSSL::SSL::SSLContext.new
         c.verify_mode = OpenSSL::SSL::VERIFY_PEER
+        c.cert_store = OpenSSL::X509::Store.new
+        c.cert_store.set_default_paths
         c
       end
     end
@@ -240,6 +250,25 @@ module Postal
         c.verify_mode = OpenSSL::SSL::VERIFY_NONE
         c
       end
+    end
+
+    def self.default_helo_hostname
+      Postal.config.dns.helo_hostname || Postal.config.dns.smtp_server_hostname || "localhost"
+    end
+
+    def self.relay_hosts
+      hosts = Postal.config.smtp_relays.map do |relay|
+        if relay.hostname.present?
+          {
+            :hostname => relay.hostname,
+            :port => relay.port,
+            :ssl_mode => relay.ssl_mode
+          }
+        else
+          nil
+        end
+      end.compact
+      hosts.empty? ? nil : hosts
     end
 
   end

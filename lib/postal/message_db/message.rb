@@ -97,21 +97,21 @@ module Postal
       # Return the timestamp for this message
       #
       def timestamp
-        @timestamp ||= @attributes['timestamp'] ? Time.at(@attributes['timestamp']) : nil
+        @timestamp ||= @attributes['timestamp'] ? Time.zone.at(@attributes['timestamp']) : nil
       end
 
       #
       # Return the time that the last delivery was attempted
       #
       def last_delivery_attempt
-        @last_delivery_attempt ||= @attributes['last_delivery_attempt'] ? Time.at(@attributes['last_delivery_attempt']) : nil
+        @last_delivery_attempt ||= @attributes['last_delivery_attempt'] ? Time.zone.at(@attributes['last_delivery_attempt']) : nil
       end
 
       #
       # Return the hold expiry for this message
       #
       def hold_expiry
-        @hold_expiry ||= @attributes['hold_expiry'] ? Time.at(@attributes['hold_expiry']) : nil
+        @hold_expiry ||= @attributes['hold_expiry'] ? Time.zone.at(@attributes['hold_expiry']) : nil
       end
 
       #
@@ -126,7 +126,7 @@ module Postal
       #
       def create_delivery(status, options = {})
         delivery = Delivery.create(self, options.merge(:status => status))
-        hold_expiry = status == 'Held' ? 7.days.from_now.to_f : nil
+        hold_expiry = status == 'Held' ? Postal.config.general.maximum_hold_expiry_days.days.from_now.to_f : nil
         self.update(:status => status, :last_delivery_attempt => delivery.timestamp.to_f, :held => status == 'Held' ? 1 : 0, :hold_expiry => hold_expiry)
         delivery
       end
@@ -328,7 +328,11 @@ module Postal
           mail = Mail.new(self.raw_headers)
           mail.header.fields.each_with_object({}) do |field, hash|
             hash[field.name.downcase] ||= []
-            hash[field.name.downcase] << field.decoded
+            begin
+              hash[field.name.downcase] << field.decoded
+            rescue Mail::Field::IncompleteParseError
+              # Never mind, move on to the next header
+            end
           end
         end
       end
@@ -494,12 +498,12 @@ module Postal
       # Inspect this message
       #
       def inspect_message
-        if result = Espect.inspect(self.raw_message, self.scope&.to_sym)
+        if result = MessageInspection.new(self.raw_message, self.scope&.to_sym)
           # Update the messages table with the results of our inspection
-          update(:inspected => 1, :spam_score => result.spam_score,  :threat => result.threat?, :threat_details => result.threat_message)
+          update(:inspected => 1, :spam_score => result.filtered_spam_score,  :threat => result.threat?, :threat_details => result.threat_message)
           # Add any spam details into the spam checks database
-          self.database.insert_multi(:spam_checks, [:message_id, :code, :score, :description], result.spam_details.map { |d| [self.id, d['code'], d['score'], d['description']]})
-          # Return the espect result
+          self.database.insert_multi(:spam_checks, [:message_id, :code, :score, :description], result.filtered_spam_checks.map { |d| [self.id, d.code, d.score, d.description]})
+          # Return the result
           result
         end
       end

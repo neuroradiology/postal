@@ -15,11 +15,11 @@ module Postal
     def self.request(method, url, options = {})
       options[:headers] ||= {}
       uri = URI.parse(url)
-      request = method.new(uri.path.length == 0 ? "/" : uri.path)
+      request = method.new((uri.path.length == 0 ? "/" : uri.path) + (uri.query ? "?" + uri.query : ""))
       options[:headers].each { |k,v| request.add_field k, v }
 
-      if options[:username]
-        request.basic_auth(options[:username], options[:password])
+      if options[:username] || uri.user
+        request.basic_auth(options[:username] || uri.user, options[:password] || uri.password)
       end
 
       if options[:params].is_a?(Hash)
@@ -38,11 +38,11 @@ module Postal
       end
 
       if options[:sign]
-        #signature = EncryptoSigno.sign(Postal.signing_key, request.body.to_s).gsub("\n", '')
-        #request.add_field 'X-Postal-Signature', signature
+        signature = EncryptoSigno.sign(Postal.signing_key, request.body.to_s).gsub("\n", '')
+        request.add_field 'X-Postal-Signature', signature
       end
 
-      request['User-Agent'] = options[:user_agent] || "Postal/#{Postal::VERSION}"
+      request['User-Agent'] = options[:user_agent] || "Postal/#{Postal.version}"
 
       connection = Net::HTTP.new(uri.host, uri.port)
 

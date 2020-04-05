@@ -5,20 +5,22 @@ module Postal
       @initial_queues = queues
       @active_queues = {}
       @process_name = $0
+      @running_jobs = []
     end
 
     def work
-      @running_job = false
-      Signal.trap("INT")  { @exit = true }
-      Signal.trap("TERM") { @exit = true }
+      logger.info "Worker running with #{Postal.config.workers.threads} threads"
 
-      self.class.job_channel.prefetch(1)
+      Signal.trap("INT")  { @exit = true; set_process_name }
+      Signal.trap("TERM") { @exit = true; set_process_name }
+
+      self.class.job_channel.prefetch(Postal.config.workers.threads)
       @initial_queues.each { |queue | join_queue(queue) }
 
       exit_checks = 0
       loop do
-        if @exit && @running_job == false
-          logger.info "Exiting immediately because no job running"
+        if @exit && @running_jobs.empty?
+          logger.info "Exiting immediately because no jobs running"
           exit 0
         elsif @exit
           if exit_checks >= 60
@@ -40,22 +42,26 @@ module Postal
     private
 
     def receive_job(delivery_info, properties, body)
-      @running_job = true
       begin
         message = JSON.parse(body) rescue nil
         if message && message['class_name']
+          @running_jobs << message['id']
+          set_process_name
           start_time = Time.now
-          $0 = "#{@process_name} (running #{message['class_name']})"
           Thread.current[:job_id] = message['id']
           logger.info "[#{message['id']}] Started processing \e[34m#{message['class_name']}\e[0m job"
           begin
             klass = message['class_name'].constantize.new(message['id'], message['params'])
             klass.perform
+            GC.start
           rescue => e
-            Raven.capture_exception(e, :extra => {:job_id => message['id']})
+            klass.on_error(e) if defined?(klass)
             logger.warn "[#{message['id']}] \e[31m#{e.class}: #{e.message}\e[0m"
             e.backtrace.each do |line|
               logger.warn "[#{message['id']}]    " + line
+            end
+            if defined?(Raven)
+              Raven.capture_exception(e, :extra => {:job_id => message['id']})
             end
           ensure
             logger.info "[#{message['id']}] Finished processing \e[34m#{message['class_name']}\e[0m job in #{Time.now - start_time}s"
@@ -63,12 +69,12 @@ module Postal
         end
       ensure
         Thread.current[:job_id] = nil
-        $0 = @process_name
         self.class.job_channel.ack(delivery_info.delivery_tag)
-        @running_job = false
+        @running_jobs.delete(message['id']) if message['id']
+        set_process_name
 
-        if @exit
-          logger.info "Exiting because a job has ended."
+        if @exit && @running_jobs.empty?
+          logger.info "Exiting because all jobs have finished."
           exit 0
         end
       end
@@ -101,6 +107,16 @@ module Postal
       @ip_to_id_mapping ||= {}
       @unassigned_ips ||= []
       @pairs ||= {}
+      @counter ||= 0
+
+      if @counter >= 15
+        @ip_to_id_mapping = {}
+        @unassigned_ips = []
+        @counter = 0
+      else
+        @counter += 1
+      end
+
       # Get all IP addresses on the system
       current_ip_addresses = Socket.ip_address_list.map(&:ip_address)
 
@@ -115,10 +131,10 @@ module Postal
           # We know this IP isn't valid. We don't need to do anything
         else
           # We need to look this up
-          if ip_address = IPAddress.where("ipv4 = ? OR ipv6 = ?", ip, ip).first
+          if !self.class.local_ip?(ip) && ip_address = IPAddress.where("ipv4 = ? OR ipv6 = ?", ip, ip).first
             @pairs[ip_address.ipv4] = ip_address.ipv6
             @ip_to_id_mapping[ip] = ip_address.id
-            need = id
+            need = ip_address.id
           else
             @unassigned_ips << ip
           end
@@ -126,8 +142,8 @@ module Postal
 
         if need
           pair = @pairs[ip] || @pairs.key(ip)
-          if current_ip_addresses.include?(pair)
-            needed_ip_ids << id
+          if pair.nil? || current_ip_addresses.include?(pair)
+            needed_ip_ids << @ip_to_id_mapping[ip]
           else
             logger.info "Host has '#{ip}' but its pair (#{pair}) isn't here. Cannot add now."
           end
@@ -157,6 +173,16 @@ module Postal
       end
     end
 
+    def set_process_name
+      prefix = @process_name.to_s
+      prefix += " [exiting]" if @exit
+      if @running_jobs.empty?
+        $0 = "#{prefix} (idle)"
+      else
+        $0 = "#{prefix} (running #{@running_jobs.join(', ')})"
+      end
+    end
+
     def logger
       self.class.logger
     end
@@ -174,6 +200,10 @@ module Postal
       @job_queues[name] ||= begin
         job_channel.queue("deliver-jobs-#{name}", :durable => true, :arguments => {'x-message-ttl' => 60000})
       end
+    end
+
+    def self.local_ip?(ip)
+      !!(ip =~ /\A(127\.|fe80:|::)/)
     end
 
   end

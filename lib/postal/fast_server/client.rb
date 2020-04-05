@@ -108,7 +108,9 @@ module Postal
       rescue BadRequest
         # We couldn't read a proper HTTP request, disconnect the client
       rescue => e
-        Raven.capture_exception(e)
+        if defined?(Raven)
+          Raven.capture_exception(e)
+        end
       ensure
         @socket.close rescue nil
         @raw_socket.close rescue nil
@@ -138,9 +140,9 @@ module Postal
           end
 
           if ssl_context.cert.nil?
-            ssl_context.cert = Postal.smtp_certificates[0]
-            ssl_context.extra_chain_cert = Postal.smtp_certificates[1..-1]
-            ssl_context.key  = Postal.smtp_private_key
+            ssl_context.cert = Postal.fast_server_default_certificates[0]
+            ssl_context.extra_chain_cert = Postal.fast_server_default_certificates[1..-1]
+            ssl_context.key  = Postal.fast_server_default_private_key
           end
 
           ssl_context.ssl_version = "SSLv23"

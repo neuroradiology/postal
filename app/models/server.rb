@@ -46,8 +46,10 @@ class Server < ApplicationRecord
   include HasUUID
   include HasSoftDestroy
 
+  attr_accessor :provision_database
+
   belongs_to :organization
-  belongs_to :ip_pool
+  belongs_to :ip_pool, :optional => true
   has_many :domains, :dependent => :destroy, :as => :owner
   has_many :credentials, :dependent => :destroy
   has_many :smtp_endpoints, :dependent => :destroy
@@ -64,7 +66,6 @@ class Server < ApplicationRecord
 
   random_string :token, :type => :chars, :length => 6, :unique => true, :upper_letters_only => true
   default_value :permalink, -> { name ? name.parameterize : nil}
-  default_value :send_limit, -> { 100 }
   default_value :raw_message_retention_days, -> { 30 }
   default_value :raw_message_retention_size, -> { 2048 }
   default_value :message_retention_days, -> { 60 }
@@ -78,15 +79,18 @@ class Server < ApplicationRecord
 
   before_validation(:on => :create) do
     self.token = self.token.downcase if self.token
-    self.outbound_spam_threshold = 3.0 if self.outbound_spam_threshold.blank?
   end
 
   after_create do
-    message_db.provisioner.provision
+    unless self.provision_database == false
+      message_db.provisioner.provision
+    end
   end
 
   after_commit(:on => :destroy) do
-    message_db.provisioner.drop
+    unless self.provision_database == false
+      message_db.provisioner.drop
+    end
   end
 
   def status
@@ -190,11 +194,11 @@ class Server < ApplicationRecord
   end
 
   def send_limit_approaching?
-    send_volume >= self.send_limit * 0.90
+    self.send_limit && (send_volume >= self.send_limit * 0.90)
   end
 
   def send_limit_exceeded?
-    send_volume >= self.send_limit
+    self.send_limit && send_volume >= self.send_limit
   end
 
   def send_limit_warning(type)
@@ -229,11 +233,6 @@ class Server < ApplicationRecord
     # Check the server's domain
     if domain = Domain.verified.order(:owner_type => :desc).where("(owner_type = 'Organization' AND owner_id = ?) OR (owner_type = 'Server' AND owner_id = ?)", self.organization_id, self.id).where(:name => domain_name).first
       return domain
-    end
-
-    # Check with global domains
-    if route = self.routes.includes(:domain).references(:domain).where(:domains => {:server_id => nil, :name => domain_name}, :name => uname).first
-      return route.domain
     end
 
     if any_domain = self.domains.verified.where(:use_for_any => true).order(:name).first
@@ -273,14 +272,13 @@ class Server < ApplicationRecord
   end
 
   def validate_ip_pool_belongs_to_organization
-    if self.ip_pool && self.ip_pool_id_changed? && (self.ip_pool.type == 'Dedicated' && !self.organization.ip_pools.include?(self.ip_pool))
+    if self.ip_pool && self.ip_pool_id_changed? && !self.organization.ip_pools.include?(self.ip_pool)
       errors.add :ip_pool_id, "must belong to the organization"
     end
   end
 
   def ip_pool_for_message(message)
     if message.scope == 'outgoing'
-
       [self, self.organization].each do |scope|
         rules = scope.ip_pool_rules.order(:created_at => :desc)
         rules.each do |rule|
@@ -289,7 +287,6 @@ class Server < ApplicationRecord
           end
         end
       end
-
       self.ip_pool
     else
       nil

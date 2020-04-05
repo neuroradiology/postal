@@ -51,7 +51,9 @@ module Postal
       if Rails.env.development?
         raise
       else
-        Raven.capture_exception(e)
+        if defined?(Raven)
+          Raven.capture_exception(e)
+        end
         @actioned = false
         @tracked_links = 0
         @tracked_images = 0
@@ -69,7 +71,7 @@ module Postal
           part.body = parse(part.body.decoded.dup, :text)
           part.content_transfer_encoding = nil
           part.charset = 'UTF-8'
-        elsif part.content_type =~ /multipart\/alternative/
+        elsif part.content_type =~ /multipart\/(alternative|related)/
           unless part.parts.empty?
             parse_parts(part.parts)
           end
@@ -78,11 +80,11 @@ module Postal
     end
 
     def parse(part, type = nil)
-      if @domain.track_clicks?
+      if Postal.tracking_available? && @domain.track_clicks?
         part = insert_links(part, type)
       end
 
-      if @domain.track_loads? && type == :html
+      if Postal.tracking_available? && @domain.track_loads? && type == :html
         part = insert_tracking_image(part)
       end
 

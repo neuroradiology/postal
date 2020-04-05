@@ -1,3 +1,4 @@
+require 'resolv'
 require 'nifty/utils/random_string'
 
 module Postal
@@ -17,7 +18,7 @@ module Postal
         else
           @state = :preauth
         end
-        reset
+        transaction_reset
       end
 
       def check_ip_address
@@ -31,11 +32,6 @@ module Postal
         @mail_from = nil
         @data = nil
         @headers = nil
-      end
-
-      def reset
-        @credential = nil
-        transaction_reset
       end
 
       def id
@@ -117,29 +113,33 @@ module Postal
       end
 
       def starttls
-        @start_tls = true
-        @tls = true
-        "220 Ready to start TLS"
+        if Postal.config.smtp_server.tls_enabled?
+          @start_tls = true
+          @tls = true
+          "220 Ready to start TLS"
+        else
+          "502 TLS not available"
+        end
       end
 
       def ehlo(data)
         resolve_hostname
         @helo_name = data.strip.split(' ', 2)[1]
-        reset
+        transaction_reset
         @state = :welcomed
-        ["250-My capabilities are", @tls ? nil : "250-STARTTLS", "250 AUTH CRAM-MD5 PLAIN LOGIN", ]
+        ["250-My capabilities are", Postal.config.smtp_server.tls_enabled? && !@tls ? "250-STARTTLS" : nil, "250 AUTH CRAM-MD5 PLAIN LOGIN", ]
       end
 
       def helo(data)
         resolve_hostname
         @helo_name = data.strip.split(' ', 2)[1]
-        reset
+        transaction_reset
         @state = :welcomed
         "250 #{Postal.config.dns.smtp_server_hostname}"
       end
 
       def rset
-        reset
+        transaction_reset
         @state = :welcomed
         '250 OK'
       end
@@ -185,6 +185,9 @@ module Postal
         if data.strip == ''
           @proc = username_handler
           '334 VXNlcm5hbWU6'
+        else
+          @proc = password_handler
+          '334 UGFzc3dvcmQ6'
         end
       end
 
@@ -231,7 +234,14 @@ module Postal
 
         @state = :mail_from_received
         transaction_reset
-        @mail_from = data.gsub(/MAIL FROM\s*:\s*/i, '').gsub(/.*</, '').gsub(/>.*/, '').strip
+        if data =~ /AUTH=/
+          # Discard AUTH= parameter and anything that follows.
+          # We don't need this parameter as we don't trust any client to set it
+          mail_from_line = data.sub(/ *AUTH=.*/, '')
+        else
+          mail_from_line = data
+        end
+        @mail_from = mail_from_line.gsub(/MAIL FROM\s*:\s*/i, '').gsub(/.*</, '').gsub(/>.*/, '').strip
         '250 OK'
       end
 
@@ -244,7 +254,7 @@ module Postal
         uname, domain = rcpt_to.split('@', 2)
         uname, tag = uname.split('+', 2)
 
-        if domain =~ /\A#{Regexp.escape(Postal.config.dns.custom_return_path_prefix)}\./
+        if domain == Postal.config.dns.return_path || domain =~ /\A#{Regexp.escape(Postal.config.dns.custom_return_path_prefix)}\./
           # This is a return path
           @state = :rcpt_to_received
           if server = ::Server.where(:token => uname).first
@@ -316,8 +326,10 @@ module Postal
         @headers = {}
         @receiving_headers = true
 
-        received_header_content = "from #{@helo_name} (#{@hostname} [#{@ip_address}]) by #{Postal.config.dns.smtp_server_hostname} with SMTP; #{Time.now.rfc2822.to_s}".force_encoding('BINARY')
-        @data << "Received: #{received_header_content}\r\n"
+        received_header_content = "from #{@helo_name} (#{@hostname} [#{@ip_address}]) by #{Postal.config.dns.smtp_server_hostname} with SMTP; #{Time.now.utc.rfc2822.to_s}".force_encoding('BINARY')
+        if !Postal.config.smtp_server.strip_received_headers?
+          @data << "Received: #{received_header_content}\r\n"
+        end
         @headers['received'] = [received_header_content]
 
         handler = Proc.new do |data|
@@ -343,10 +355,15 @@ module Postal
                 if @header_key && @headers[@header_key.downcase] && @headers[@header_key.downcase].last
                   @headers[@header_key.downcase].last << data.to_s
                 end
+                # If received headers are configured to be stripped and we're currently receiving one
+                # skip the append methods at the bottom of this loop.
+                next if Postal.config.smtp_server.strip_received_headers? && @header_key && @header_key.downcase == "received"
               else
                 @header_key, value = data.split(/\:\s*/, 2)
                 @headers[@header_key.downcase] ||= []
                 @headers[@header_key.downcase] << value
+                # As above
+                next if Postal.config.smtp_server.strip_received_headers? && @header_key && @header_key.downcase == "received"
               end
             end
             @data << data
@@ -360,11 +377,15 @@ module Postal
       end
 
       def finished
-        if @data.bytesize > 14.megabytes.to_i
-          return "552 Message too large (maximum size 14MB)"
+        if @data.bytesize > Postal.config.smtp_server.max_message_size.megabytes.to_i
+          transaction_reset
+          @state = :welcomed
+          return "552 Message too large (maximum size %dMB)" % Postal.config.smtp_server.max_message_size
         end
 
         if @headers['received'].select { |r| r =~ /by #{Postal.config.dns.smtp_server_hostname}/ }.count > 4
+          transaction_reset
+          @state = :welcomed
           return '550 Loop detected'
         end
 
@@ -372,6 +393,8 @@ module Postal
         if @credential
           authenticated_domain = @credential.server.find_authenticated_domain_from_headers(@headers)
           if authenticated_domain.nil?
+            transaction_reset
+            @state = :welcomed
             return '530 From/Sender name is not valid'
           end
         end
@@ -423,6 +446,7 @@ module Postal
           end
         end
         transaction_reset
+        @state = :welcomed
         '250 OK'
       end
 

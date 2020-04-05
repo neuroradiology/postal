@@ -87,7 +87,7 @@ class IncomingMessagePrototype
       mail.to = @to
       mail.from = @from
       mail.subject = @subject
-      mail.body = @plain_body
+      mail.text_part = @plain_body
       mail.message_id = "<#{SecureRandom.uuid}@#{Postal.config.dns.return_path}>"
       attachments.each do |attachment|
         mail.attachments[attachment[:name]] = {
@@ -95,7 +95,7 @@ class IncomingMessagePrototype
           :content => attachment[:data]
         }
       end
-      mail.header['Received'] = "from #{@source_type} (#{@ip} [#{@ip}]) by Postal with HTTP; #{Time.now.rfc2822.to_s}"
+      mail.header['Received'] = "from #{@source_type} (#{@ip} [#{@ip}]) by Postal with HTTP; #{Time.now.utc.rfc2822.to_s}"
       mail.to_s
     end
   end

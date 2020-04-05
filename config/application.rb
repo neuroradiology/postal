@@ -14,6 +14,9 @@ Bundler.require(*Rails.groups)
 
 module Postal
   class Application < Rails::Application
+    # Set the Rails logger
+    config.logger = Postal.logger_for(:rails)
+
     # Disable most generators
     config.generators do |g|
       g.orm             :active_record
@@ -24,7 +27,7 @@ module Postal
     end
 
     # Include from lib
-    config.eager_load_paths += %W(#{config.root}/lib #{config.root}/app/jobs)
+    config.eager_load_namespaces << Postal
 
     # Disable field_with_errors
     config.action_view.field_error_proc = Proc.new { |t, i| t }

@@ -3,12 +3,6 @@ require 'logger'
 module Postal
   class AppLogger < Logger
 
-
-    def self.greylog_notifier
-      @greylog_notifier ||= Postal.config.logging.greylog ? GELF::Notifier.new(Postal.config.logging.greylog.host, Postal.config.logging.greylog.port) : nil
-
-    end
-
     def initialize(log_name, *args)
       @log_name = log_name
       super(*args)
@@ -17,7 +11,7 @@ module Postal
 
     def add(severity, message = nil, progname = nil)
       super
-      if n = self.class.greylog_notifier
+      if severity >= @level && n = self.class.greylog_notifier
         begin
           if message.nil?
             message = block_given? ? yield : progname
@@ -27,10 +21,17 @@ module Postal
           n.notify!(:short_message => message_without_ansi, :log_name => @log_name, :facility => 'postal', :application_name => 'postal', :process_name => ENV['PROC_NAME'], :pid => Process.pid)
         rescue => e
           # Can't log this to GELF. Soz.
-          Raven.capture_exception(e)
         end
       end
       true
+    end
+
+    def self.greylog?
+      !!Postal.config.logging.greylog&.host
+    end
+
+    def self.greylog_notifier
+      @greylog_notifier ||= greylog? ? GELF::Notifier.new(Postal.config.logging.greylog.host, Postal.config.logging.greylog.port) : nil
     end
   end
 

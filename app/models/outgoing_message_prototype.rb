@@ -1,3 +1,5 @@
+require 'resolv'
+
 class OutgoingMessagePrototype
 
   attr_accessor :from
@@ -161,11 +163,15 @@ class OutgoingMessagePrototype
       if @html_body.blank? && attachments.empty?
         mail.body = @plain_body
       else
-        mail.text_part = Mail::Part.new
-        mail.text_part.body = @plain_body
-        mail.html_part = Mail::Part.new
-        mail.html_part.content_type = "text/html; charset=UTF-8"
-        mail.html_part.body = @html_body
+        if !@plain_body.blank?
+          mail.text_part = Mail::Part.new
+          mail.text_part.body = @plain_body
+        end
+        if !@html_body.blank?
+          mail.html_part = Mail::Part.new
+          mail.html_part.content_type = "text/html; charset=UTF-8"
+          mail.html_part.body = @html_body
+        end
       end
       attachments.each do |attachment|
         mail.attachments[attachment[:name]] = {

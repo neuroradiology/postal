@@ -64,13 +64,25 @@ module Postal
       end
 
       #
+      # Clean the database. This really only useful in development & testing
+      # environment and can be quite dangerous in production.
+      #
+      def clean
+        ['clicks', 'deliveries', 'links', 'live_stats', 'loads', 'messages',
+          'raw_message_sizes', 'spam_checks', 'stats_daily', 'stats_hourly',
+          'stats_monthly', 'stats_yearly', 'suppressions', 'webhook_requests'].each do |table|
+          @database.query("TRUNCATE `#{@database.database_name}`.`#{table}`")
+        end
+      end
+
+      #
       # Creates a new empty raw message table for the given date. Returns nothing.
       #
       def create_raw_table(table)
         begin
           @database.query(create_table_query(table,:columns => {
               :id   =>  'int(11) NOT NULL AUTO_INCREMENT',
-              :data =>  'mediumblob DEFAULT NULL',
+              :data =>  'longblob DEFAULT NULL',
               :next =>  'int(11) DEFAULT NULL'
             }
           ))

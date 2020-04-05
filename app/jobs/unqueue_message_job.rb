@@ -51,10 +51,10 @@ class UnqueueMessageJob < Postal::Job
             end
 
             # We might not be able to send this any more, check the attempts
-            if queued_message.attempts >= QueuedMessage::MAX_ATTEMPTS
+            if queued_message.attempts >= Postal.config.general.maximum_delivery_attempts
               details = "Maximum number of delivery attempts (#{queued_message.attempts}) has been reached."
               if queued_message.message.scope == 'incoming'
-                # Send bounceds to incoming e-mails when they are hard failed
+                # Send bounces to incoming e-mails when they are hard failed
                 if bounce_id = queued_message.send_bounce
                   details += " Bounce sent to sender (see message <msg:#{bounce_id}>)"
                 end
@@ -145,6 +145,15 @@ class UnqueueMessageJob < Postal::Job
                 next
               end
 
+              # If the server is in development mode, hold it
+              if queued_message.server.mode == 'Development' && !queued_message.manual?
+                log "Server is in development mode so holding."
+                queued_message.message.create_delivery('Held', :details => "Server is in development mode.")
+                queued_message.destroy
+                log "#{log_prefix} Server is in development mode. Holding."
+                next
+              end
+
               #
               # Find out what sort of message we're supposed to be sending and dispatch this request over to
               # the sender.
@@ -231,7 +240,10 @@ class UnqueueMessageJob < Postal::Job
 
                 # Log the result
                 log_details = result.details
-                if result.type =='HardFail' && queued_message.message.send_bounces?
+                if result.type =='HardFail' && result.suppress_bounce
+                  # The delivery hard failed, but requested that no bounce be sent
+                  log "#{log_prefix} Suppressing bounce message after hard fail"
+                elsif result.type =='HardFail' && queued_message.message.send_bounces?
                   # If the message is a hard fail, send a bounce message for this message.
                   log "#{log_prefix} Sending a bounce because message hard failed"
                   if bounce_id = queued_message.send_bounce
@@ -355,7 +367,7 @@ class UnqueueMessageJob < Postal::Job
 
               # If the server is in development mode, hold it
               if queued_message.server.mode == 'Development' && !queued_message.manual?
-                log "Server is in development mode and this is a outgoing message so holding."
+                log "Server is in development mode so holding."
                 queued_message.message.create_delivery('Held', :details => "Server is in development mode.")
                 queued_message.destroy
                 log "#{log_prefix} Server is in development mode. Holding."
@@ -417,9 +429,11 @@ class UnqueueMessageJob < Postal::Job
             e.backtrace.each { |e| log("#{log_prefix} #{e}") }
             queued_message.retry_later
             log "#{log_prefix} Queued message was unlocked"
-            Raven.capture_exception(e, :extra => {:job_id => self.id, :server_id => queued_message.server_id, :message_id => queued_message.message_id})
+            if defined?(Raven)
+              Raven.capture_exception(e, :extra => {:job_id => self.id, :server_id => queued_message.server_id, :message_id => queued_message.message_id})
+            end
             if queued_message.message
-              queued_message.message.create_delivery("Error", :details => "An internal error occurred while sending this message. This message will be retried automatically. This this persists, contact support for assistance.", :output => "#{e.class}: #{e.message}", :log_id => "J-#{self.id}")
+              queued_message.message.create_delivery("Error", :details => "An internal error occurred while sending this message. This message will be retried automatically. If this persists, contact support for assistance.", :output => "#{e.class}: #{e.message}", :log_id => "J-#{self.id}")
             end
           end
         end
